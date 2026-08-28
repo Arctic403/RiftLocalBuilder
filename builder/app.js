@@ -1,5 +1,5 @@
 import{RIFT_LOCAL_BUILD_JOB_FORMAT,RIFT_LOCAL_BUILD_VERSION}from'./local-build-core.js';
-import{RiftGitHubClient}from'./github.js';
+import{RiftGitHubClient}from'./github.js?v=h2.13-persistent-auth-1';
 import{getLocal,listLocal,putLocal,saveCandidate,saveResult}from'./storage.js';
 const $=s=>document.querySelector(s),client=new RiftGitHubClient(),worker=new Worker(new URL('./local-build-worker.js',import.meta.url),{type:'module'}),pending=new Map();let latest=null,pollTimer=null,syncing=false;
 const ui={token:$('#github-token'),connect:$('#connect'),disconnect:$('#disconnect'),auth:$('#auth-status'),queue:$('#queue-status'),waiting:$('#waiting-count'),completed:$('#completed-count'),historyCount:$('#history-count'),auto:$('#auto-poll'),sync:$('#sync-jobs'),refresh:$('#refresh-history'),target:$('#target-path'),load:$('#load-target'),json:$('#candidate-json'),run:$('#run-build'),build:$('#build-status'),publish:$('#publish-result'),download:$('#download-result'),result:$('#result-card'),title:$('#result-title'),resultStatus:$('#result-status'),stats:$('#stats'),stages:$('#stages'),diagnostics:$('#diagnostics'),history:$('#history'),runtime:$('#runtime-pill'),dialog:$('#message-dialog'),dialogTitle:$('#dialog-title'),dialogMessage:$('#dialog-message'),dialogClose:$('#dialog-close')};

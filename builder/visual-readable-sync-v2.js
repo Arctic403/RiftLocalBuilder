@@ -24,15 +24,24 @@ function sameIdentity(a, b) {
     a.compiled_document_sha256 === b.compiled_document_sha256);
 }
 
-function uiBusy() {
+function visualUploaderBusy() {
   const visual = document.querySelector('#inspect-status');
+  if (!visual?.classList.contains('busy')) return false;
+  const text = String(visual.textContent || '').toLowerCase();
+  return text.includes('captur') ||
+    text.includes('uploading visual') ||
+    text.includes('queueing visual') ||
+    text.includes('rendering');
+}
+
+function conflictingWriterBusy() {
   const queue = document.querySelector('#queue-status');
-  return visual?.classList.contains('busy') || queue?.classList.contains('busy');
+  return visualUploaderBusy() || Boolean(queue?.classList.contains('busy'));
 }
 
 function setVisualStatus(text, kind = 'busy') {
   const el = document.querySelector('#inspect-status');
-  if (!el || el.classList.contains('busy')) return;
+  if (!el) return;
   el.textContent = text;
   el.className = `status ${kind}`;
 }
@@ -72,7 +81,7 @@ async function queueHead() {
 async function commitFiles(files, message) {
   let lastError = null;
   for (let attempt = 0; attempt < 6; attempt += 1) {
-    if (uiBusy()) await sleep(500);
+    while (conflictingWriterBusy()) await sleep(350);
     const head = await queueHead();
     const tree = await client.api(repoApi('/git/trees'), {
       method: 'POST',
@@ -101,13 +110,16 @@ async function commitFiles(files, message) {
 }
 
 async function syncLatestReadable() {
-  if (syncing || !client.connected || document.visibilityState === 'hidden' || uiBusy()) return;
+  if (syncing || !client.connected || document.visibilityState === 'hidden' || conflictingWriterBusy()) return;
   syncing = true;
   try {
     const latest = await readQueueJson(`${VISUALS_DIR}/latest.json`);
     if (!latest?.manifest_path) return;
     const currentReadable = await readQueueJson(`${VISUALS_DIR}/latest-readable.json`);
-    if (sameIdentity(latest, currentReadable)) return;
+    if (sameIdentity(latest, currentReadable)) {
+      setVisualStatus('Photos ready for AI', 'pass');
+      return;
+    }
 
     const manifest = await readQueueJson(latest.manifest_path);
     if (!sameIdentity(latest, manifest)) throw new Error('Visual latest pointer does not match its manifest.');
@@ -117,7 +129,7 @@ async function syncLatestReadable() {
     const files = [];
     const readableCaptures = [];
     for (let i = 0; i < manifest.captures.length; i += 1) {
-      if (uiBusy()) throw new Error('Visual uploader became busy; readable sync will retry.');
+      if (conflictingWriterBusy()) throw new Error('Visual uploader became busy; readable sync will retry.');
       const capture = manifest.captures[i];
       setVisualStatus(`AI bridge ${i + 1}/${manifest.captures.length}…`);
       const base64 = await readQueueContent(capture.path);
@@ -168,6 +180,7 @@ async function syncLatestReadable() {
     const latestReadableBlob = await gitBlob(`${JSON.stringify(latestReadable, null, 2)}\n`, 'utf-8');
     files.push({ path: `${VISUALS_DIR}/latest-readable.json`, sha: latestReadableBlob.sha });
 
+    setVisualStatus('Finalizing AI-readable views…');
     await commitFiles(files, `Rift Local readable visual sync: ${latest.job_id}`);
 
     const [verifiedLatest, verifiedReadable] = await Promise.all([

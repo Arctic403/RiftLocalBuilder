@@ -1,0 +1,1 @@
+{"id":"./","name":"Rift Local Builder","short_name":"Rift Builder","description":"RiftCity private H2 compiler host and local GitHub job worker","start_url":"./","scope":"./","display":"standalone","orientation":"any","background_color":"#080b0f","theme_color":"#0c1015","icons":[{"src":"./icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}

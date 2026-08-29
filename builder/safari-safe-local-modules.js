@@ -18,6 +18,36 @@ function moduleBlob(source){
 function absolute(path){return new URL(path,ROOT).href}
 async function dependencyBlob(path,label){return moduleBlob(await text(absolute(path),label))}
 
+function repairNestedTemplateInterpolations(source,module){
+  if(module.name==='Standard Visual Gate'){
+    source=source
+      .replace(
+        'const captureId = \\`${Date.now()}-\\${safe(candidateHash.slice(0, 12))}\\`;',
+        'const captureId = \\`\\${Date.now()}-\\${safe(candidateHash.slice(0, 12))}\\`;'
+      )
+      .replace(
+        'const path = \\`${root}/\\${capture.id}.jpg\\`;',
+        'const path = \\`\\${root}/\\${capture.id}.jpg\\`;'
+      );
+  }
+  if(module.name==='Autonomous Visual QA'){
+    source=source
+      .replace(
+        'const inspectionId=\\`${visualCapture}-coverage-v2-adaptive-local\\`;',
+        'const inspectionId=\\`\\${visualCapture}-coverage-v2-adaptive-local\\`;'
+      )
+      .replace(
+        'const jpgPath=\\`${root}/\\${shot.id}.jpg\\`;',
+        'const jpgPath=\\`\\${root}/\\${shot.id}.jpg\\`;'
+      )
+      .replace(
+        'const manifestPath=\\`${root}/manifest.json\\`;',
+        'const manifestPath=\\`\\${root}/manifest.json\\`;'
+      );
+  }
+  return source;
+}
+
 function renderError(module,error){
   console.error(`[Rift ${module.name} loader]`,error);
   const slot=document.querySelector(module.slot);
@@ -25,7 +55,9 @@ function renderError(module,error){
   const card=document.createElement('section');
   card.className='card module-load-error';
   card.innerHTML=`<div class="section-title"><div><div class="eyebrow">MODULE ERROR</div><h2>${module.name}</h2></div><span class="status fail">LOAD FAILED</span></div><p class="hint"></p><button class="secondary">Reload module</button>`;
-  card.querySelector('.hint').textContent=error?.stack||error?.message||String(error);
+  const message=error?.message||String(error)||'Unknown module error.';
+  const stack=error?.stack||'';
+  card.querySelector('.hint').textContent=stack&&stack.includes(message)?stack:`${message}${stack?`\n${stack}`:''}`;
   card.querySelector('button').onclick=()=>location.reload();
   slot.replaceChildren(card);
 }
@@ -39,7 +71,7 @@ async function run(module){
       dependencyBlob('./local-media.js?v=h2.22-1',`${module.name} local-media dependency`)
     ]);
 
-    let source=loaderSource;
+    let source=repairNestedTemplateInterpolations(loaderSource,module);
     const baseAbsolute=absolute(module.base);
     source=source
       .replace(/const originalUrl=new URL\([^;]+;/,`const originalUrl=new URL(${JSON.stringify(baseAbsolute)});`)

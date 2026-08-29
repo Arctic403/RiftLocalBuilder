@@ -28,6 +28,14 @@ function repairNestedTemplateInterpolations(source,module){
       .replace(
         'const path = \\`${root}/\\${capture.id}.jpg\\`;',
         'const path = \\`\\${root}/\\${capture.id}.jpg\\`;'
+      )
+      .replace(
+        'const manifestPath = \\`${root}/manifest.json\\`;',
+        'const manifestPath = \\`\\${root}/manifest.json\\`;'
+      )
+      .replace(
+        "status.textContent = \\`${captureMeta.length} views saved locally\\`;",
+        "status.textContent = \\`\\${captureMeta.length} views saved locally\\`;"
       );
   }
   if(module.name==='Autonomous Visual QA'){

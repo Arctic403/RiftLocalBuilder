@@ -1,6 +1,6 @@
 const MODULES=[
   {name:'Standard Visual Gate',slot:'#visual-gate-slot',loader:'./local-inspector-local-loader.js?v=h2.22-1',base:'./local-inspector.js?v=h2.14-photo-upload-1'},
-  {name:'Autonomous Visual QA',slot:'#autonomous-slot',loader:'./autonomous-visual-local-adaptive-loader.js?v=h2.22-1',base:'./autonomous-visual-inspector.js?v=h2.15-1'}
+  {name:'Autonomous Visual QA',slot:'#autonomous-slot',loader:'./autonomous-visual-local-adaptive-loader.js?v=h2.27-1',base:'./autonomous-visual-inspector.js?v=h2.15-1'}
 ];
 const ROOT=new URL('./',import.meta.url);
 const objectUrls=[];
@@ -41,8 +41,8 @@ function repairNestedTemplateInterpolations(source,module){
   if(module.name==='Autonomous Visual QA'){
     source=source
       .replace(
-        'const inspectionId=\\`${visualCapture}-coverage-v2-adaptive-local\\`;',
-        'const inspectionId=\\`\\${visualCapture}-coverage-v2-adaptive-local\\`;'
+        'const inspectionId=\\`${visualCapture}-coverage-v3-targeted-local\\`;',
+        'const inspectionId=\\`\\${visualCapture}-coverage-v3-targeted-local\\`;'
       )
       .replace(
         'const jpgPath=\\`${root}/\\${shot.id}.jpg\\`;',

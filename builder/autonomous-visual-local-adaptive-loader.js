@@ -10,20 +10,53 @@ source=source
  .replace("from './storage.js'",`from '${storageUrl}'`)
  .replace("from './github.js'",`from '${githubUrl}'`)
  .replace('const MAX_SHOTS = 36;',`const MIN_SHOTS = 20;\nconst MAX_BASE_SHOTS = 72;\nconst HARD_SAFETY_CAP = 120;`)
- .replaceAll('coverage-driven-voxel-los-v1','coverage-driven-voxel-los-v3-targeted-local')
- .replaceAll('-coverage-v1','-coverage-v3-targeted-local');
+ .replaceAll('coverage-driven-voxel-los-v1','coverage-driven-voxel-los-v4-anchor-surface-local')
+ .replaceAll('-coverage-v1','-coverage-v4-anchor-surface-local');
 source=`import { putBase64Media, putLocalJson, getLocalJson } from '${mediaUrl}';\n${source}`;
 
 const coverageStart=source.indexOf('function calculateCoverage(cells, targets, candidates) {');
 const coverageEnd=source.indexOf('\nfunction orderRoute(selected) {',coverageStart);
 if(coverageStart<0||coverageEnd<0)throw new Error('Could not patch targeted autonomous coverage planner.');
-const targetedCoverage=`function recoveryAimPoints(item) {
+const targetedCoverage=`function anchorSurfaceAimPoints(cells,item){
+  const p=item.point,points=[],seen=new Set();
+  const addPoint=(point,kind)=>{
+    const k=point.map(v=>Math.round(v*20)/20).join('|');
+    if(seen.has(k)||occupied(cells,point))return;
+    seen.add(k);points.push({point,kind});
+  };
+  const directions=[
+    [1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[0,1,0],
+    [1,0,1],[1,0,-1],[-1,0,1],[-1,0,-1],
+    [1,.45,0],[-1,.45,0],[0,.45,1],[0,.45,-1]
+  ].map(normalize);
+  for(const dir of directions){
+    let wasSolid=occupied(cells,p);
+    for(let d=.3;d<=4.8;d+=.25){
+      const q=add(p,dir,d),solid=occupied(cells,q);
+      if(wasSolid&&!solid){
+        addPoint(add(q,dir,.18),'surface-exit');
+        break;
+      }
+      wasSolid=solid;
+    }
+  }
+  for(const dy of [.65,1.15,1.65,2.15,2.65,3.15]){
+    const q=[p[0],p[1]+dy,p[2]];
+    if(!occupied(cells,q)){addPoint(q,'surface-top');break}
+  }
+  return points;
+}
+function recoveryAimPoints(cells,item) {
   const p=item.point;
-  const points=[p];
+  if(item.category==='anchor'&&occupied(cells,p)){
+    const surface=anchorSurfaceAimPoints(cells,item);
+    if(surface.length)return surface;
+  }
+  const points=[{point:p,kind:'exact'}];
   if(item.category==='space'||item.category==='anchor'){
-    for(const [dx,dy,dz] of [[.65,0,0],[-.65,0,0],[0,0,.65],[0,0,-.65],[.65,.35,.65],[-.65,.35,.65],[.65,.35,-.65],[-.65,.35,-.65],[0,.65,0]]) points.push([p[0]+dx,p[1]+dy,p[2]+dz]);
+    for(const [dx,dy,dz] of [[.65,0,0],[-.65,0,0],[0,0,.65],[0,0,-.65],[.65,.35,.65],[-.65,.35,.65],[.65,.35,-.65],[-.65,.35,-.65],[0,.65,0]]) points.push({point:[p[0]+dx,p[1]+dy,p[2]+dz],kind:'nearby'});
   } else if(item.category==='roof'||item.category==='site'||item.category==='facade') {
-    for(const [dx,dz] of [[.8,0],[-.8,0],[0,.8],[0,-.8]]) points.push([p[0]+dx,p[1],p[2]+dz]);
+    for(const [dx,dz] of [[.8,0],[-.8,0],[0,.8],[0,-.8]]) points.push({point:[p[0]+dx,p[1],p[2]+dz],kind:'nearby'});
   }
   return points;
 }
@@ -38,12 +71,13 @@ function recoveryVisible(cells,view,item){
   return clearRay(cells,view.position,aim);
 }
 function recoveryCandidateViews(cells,item,seed=0){
-  const views=[],seen=new Set(),aims=recoveryAimPoints(item),normal=item.normal?normalize(item.normal):null;
+  const views=[],seen=new Set(),aimRows=recoveryAimPoints(cells,item),aims=aimRows.map(row=>row.point),normal=item.normal?normalize(item.normal):null;
   const addView=(position,aim,suffix,kind='recovery-targeted')=>{
     const pos=findFree(cells,position),k=pos.map(v=>Math.round(v*10)/10).join('|')+'@'+aim.map(v=>Math.round(v*10)/10).join('|');
     if(seen.has(k)||occupied(cells,pos)||occupied(cells,[pos[0],pos[1]+.8,pos[2]]))return;
     seen.add(k);
-    views.push(candidate(\`recovery-\${safe(item.id)}-\${seed}-\${suffix}\`,\`Recovery · \${item.id} · \${suffix}\`,kind,pos,aim,{recoveryTargetId:item.id,recoveryAim:aim,fov:Math.PI*.72}));
+    const aimIndex=aims.indexOf(aim),aimKind=aimRows[aimIndex]?.kind||'exact';
+    views.push(candidate(\`recovery-\${safe(item.id)}-\${seed}-\${suffix}\`,\`Recovery · \${item.id} · \${suffix}\`,kind,pos,aim,{recoveryTargetId:item.id,recoveryAim:aim,recoveryAimKind:aimKind,recoverySurfaceSubstitution:item.category==='anchor'&&aimKind.startsWith('surface-'),fov:Math.PI*.72}));
   };
   if(normal){
     const tangent=Math.abs(normal[0])>.5?[0,0,1]:[1,0,0];
@@ -74,7 +108,7 @@ function calculateCoverage(cells,targets,candidates){
   while(selected.length<adaptiveBaseBudget){const best=chooseBest(candidates,false);if(!best)break;take(best);if(criticalGoalMet()&&optionalGoalMet())break}
 
   let emergencyViewsGenerated=0,criticalRecoveryViewsSelected=0,optionalRecoveryViewsSelected=0;
-  const recoveryFailures=[];
+  const recoveryFailures=[],surfaceSubstitutions=[];
   for(const item of allCritical.filter(t=>!covered.has(t.id))){
     if(selected.length>=HARD_SAFETY_CAP)break;
     const rows=recoveryCandidateViews(cells,item,criticalRecoveryViewsSelected);
@@ -84,7 +118,7 @@ function calculateCoverage(cells,targets,candidates){
     const valid=rows.filter(view=>recoveryVisible(cells,view,item));
     if(valid.length){
       valid.sort((a,b)=>distance(a.position,item.point)-distance(b.position,item.point));
-      take(valid[0]);criticalRecoveryViewsSelected+=1;
+      take(valid[0]);if(valid[0].recoverySurfaceSubstitution)surfaceSubstitutions.push({target:item.id,aim:valid[0].recoveryAim,kind:valid[0].recoveryAimKind});criticalRecoveryViewsSelected+=1;
     }else recoveryFailures.push({target:item.id,category:item.category,candidates:rows.length,targetOccupied:occupied(cells,item.point),reason:rows.length?'no-clear-targeted-los':'no-free-recovery-camera'});
   }
 
@@ -105,7 +139,7 @@ function calculateCoverage(cells,targets,candidates){
   const criticalCovered=allCritical.filter(t=>covered.has(t.id)).length,optionalCovered=optional.filter(t=>covered.has(t.id)).length;
   const categories={};for(const item of targets){const row=categories[item.category]||=( {total:0,covered:0,critical:0,criticalCovered:0} );row.total+=1;if(item.critical)row.critical+=1;if(covered.has(item.id)){row.covered+=1;if(item.critical)row.criticalCovered+=1}}
   const categoryCoverage={};for(const [name,row] of Object.entries(categories))categoryCoverage[name]=row.total?row.covered/row.total:1;
-  return{selected,covered,report:{ok:criticalCovered===allCritical.length&&optionalGoalMet(),plannerVersion:'adaptive-v3-targeted-local',initialCandidateViews,candidateViews:candidates.length,emergencyViewsGenerated,adaptiveBaseBudget,hardSafetyCap:HARD_SAFETY_CAP,budgetExpanded:selected.length>adaptiveBaseBudget,criticalRecoveryViewsSelected,optionalRecoveryViewsSelected,recoveryFailures,selectedViews:selected.length,targets:targets.length,criticalTargets:allCritical.length,criticalCovered,optionalTargets:optional.length,optionalCovered,optionalCoverageRatio:optional.length?optionalCovered/optional.length:1,requiredOptionalCoverageRatio:OPTIONAL_TARGET_RATIO,categoryMinimums:{facade:.95,roof:.95,site:.90},categoryCoverage,categories,uncoveredCritical:allCritical.filter(t=>!covered.has(t.id)).map(t=>t.id)}};
+  return{selected,covered,report:{ok:criticalCovered===allCritical.length&&optionalGoalMet(),plannerVersion:'adaptive-v4-anchor-surface-local',initialCandidateViews,candidateViews:candidates.length,emergencyViewsGenerated,adaptiveBaseBudget,hardSafetyCap:HARD_SAFETY_CAP,budgetExpanded:selected.length>adaptiveBaseBudget,criticalRecoveryViewsSelected,optionalRecoveryViewsSelected,recoveryFailures,surfaceSubstitutions,selectedViews:selected.length,targets:targets.length,criticalTargets:allCritical.length,criticalCovered,optionalTargets:optional.length,optionalCovered,optionalCoverageRatio:optional.length?optionalCovered/optional.length:1,requiredOptionalCoverageRatio:OPTIONAL_TARGET_RATIO,categoryMinimums:{facade:.95,roof:.95,site:.90},categoryCoverage,categories,uncoveredCritical:allCritical.filter(t=>!covered.has(t.id)).map(t=>t.id)}};
 }
 `;
 source=source.slice(0,coverageStart)+targetedCoverage+source.slice(coverageEnd);
@@ -130,7 +164,7 @@ const packEnd=source.indexOf('\nasync function inspectRow(row) {',packStart);
 if(packStart<0||packEnd<0)throw new Error('Could not patch local autonomous pack storage.');
 const localPack=`async function queueAutonomousPack(client, row, coverage, captures) {
   const visualCapture=row.publicResult.visual_pack.capture_id;
-  const inspectionId=\`${visualCapture}-coverage-v3-targeted-local\`;
+  const inspectionId=\`${visualCapture}-coverage-v4-anchor-surface-local\`;
   const root=\`autonomous/\${safe(row.id)}/\${safe(inspectionId)}\`;
   const captureMeta=[];
   setStatus('Saving inspection pack locally…','busy');
@@ -141,9 +175,9 @@ const localPack=`async function queueAutonomousPack(client, row, coverage, captu
     captureMeta.push({id:shot.id,label:shot.label,kind:shot.kind,path:jpgPath,width:shot.width,height:shot.height,position:shot.position,look_at:shot.lookAt,covers:shot.covers,storage:saved.storage});
     await new Promise(resolve=>setTimeout(resolve,0));
   }
-  const manifest={format:'riftcity-autonomous-visual-inspection',version:3,planner:'coverage-driven-voxel-los-v3-targeted-local',storage:'local',job_id:row.id,inspection_id:inspectionId,source_branch:client.config.sourceBranch,candidate_sha256:row.publicResult.candidate_sha256,compiled_document_sha256:row.publicResult.compiled_document_sha256,standard_visual_capture_id:visualCapture,generated_at:Date.now(),coverage:coverage.report,route:captureMeta.map(c=>c.id),captures:captureMeta};
+  const manifest={format:'riftcity-autonomous-visual-inspection',version:4,planner:'coverage-driven-voxel-los-v4-anchor-surface-local',storage:'local',job_id:row.id,inspection_id:inspectionId,source_branch:client.config.sourceBranch,candidate_sha256:row.publicResult.candidate_sha256,compiled_document_sha256:row.publicResult.compiled_document_sha256,standard_visual_capture_id:visualCapture,generated_at:Date.now(),coverage:coverage.report,route:captureMeta.map(c=>c.id),captures:captureMeta};
   const manifestPath=\`${root}/manifest.json\`;await putLocalJson(manifestPath,manifest);
-  const marker={planner_version:'adaptive-v3-targeted',storage:'local',status:coverage.report.ok?'coverage-pass':'coverage-incomplete',inspection_id:inspectionId,manifest_path:manifestPath,standard_visual_capture_id:visualCapture,candidate_sha256:row.publicResult.candidate_sha256,compiled_document_sha256:row.publicResult.compiled_document_sha256,coverage:coverage.report,captures:captureMeta.map(({id,path,kind,width,height})=>({id,path,kind,width,height}))};
+  const marker={planner_version:'adaptive-v4-anchor-surface',storage:'local',status:coverage.report.ok?'coverage-pass':'coverage-incomplete',inspection_id:inspectionId,manifest_path:manifestPath,standard_visual_capture_id:visualCapture,candidate_sha256:row.publicResult.candidate_sha256,compiled_document_sha256:row.publicResult.compiled_document_sha256,coverage:coverage.report,captures:captureMeta.map(({id,path,kind,width,height})=>({id,path,kind,width,height}))};
   window.dispatchEvent(new CustomEvent('rift-local-autonomous-ready',{detail:{jobId:row.id,inspectionId,status:marker.status}}));
   return marker;
 }
@@ -151,10 +185,10 @@ const localPack=`async function queueAutonomousPack(client, row, coverage, captu
 source=source.slice(0,packStart)+localPack+source.slice(packEnd);
 
 const oldGuard="if (existing?.candidate_sha256 === row.publicResult.candidate_sha256 && existing?.compiled_document_sha256 === row.publicResult.compiled_document_sha256 && existing?.standard_visual_capture_id === row.publicResult.visual_pack.capture_id) return existing;";
-const newGuard="if (existing?.planner_version === 'adaptive-v3-targeted' && existing?.storage === 'local' && existing?.candidate_sha256 === row.publicResult.candidate_sha256 && existing?.compiled_document_sha256 === row.publicResult.compiled_document_sha256 && existing?.standard_visual_capture_id === row.publicResult.visual_pack.capture_id) return existing;";
+const newGuard="if (existing?.planner_version === 'adaptive-v4-anchor-surface' && existing?.storage === 'local' && existing?.candidate_sha256 === row.publicResult.candidate_sha256 && existing?.compiled_document_sha256 === row.publicResult.compiled_document_sha256 && existing?.standard_visual_capture_id === row.publicResult.visual_pack.capture_id) return existing;";
 if(!source.includes(oldGuard))throw new Error('Could not patch local autonomous rerun guard.');
 source=source.replace(oldGuard,newGuard)
- .replace('keeps only useful views, then queues JPEGs + AI-readable copies + a coverage manifest.','keeps only useful views, expands coverage with target-directed recovery cameras, then saves the JPEGs and coverage manifest only on this iPhone.')
+ .replace('keeps only useful views, then queues JPEGs + AI-readable copies + a coverage manifest.','keeps only useful views, expands coverage with target-directed recovery cameras and occupied-anchor surface targeting, then saves the JPEGs and coverage manifest only on this iPhone.')
  .replaceAll('Queueing inspection pack…','Saving inspection pack locally…');
 
 const blobUrl=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));

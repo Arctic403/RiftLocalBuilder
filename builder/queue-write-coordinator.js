@@ -10,27 +10,102 @@
     `${REPO_PREFIX}/git/refs/heads/${QUEUE_BRANCH}`
   ]);
   const UPDATE_REF_PATH=`${REPO_PREFIX}/git/refs/heads/${QUEUE_BRANCH}`;
-  const TX_TIMEOUT_MS=45000;
+  const TX_TIMEOUT_MS=90000;
+  const WEB_LOCK_NAME='riftcity-rift-local-queue-write-v1';
+  const LEASE_KEY='rift-local-builder.queue-write-lease-v1';
+  const LEASE_MS=12000;
+  const INSTANCE_ID=(globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random()}`);
 
   let tail=Promise.resolve();
   let transactionRelease=null;
 
-  async function acquire(label){
+  const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+
+  async function acquireLocal(){
     let unlock;
     const gate=new Promise(resolve=>{unlock=resolve});
     const previous=tail;
     tail=previous.catch(()=>{}).then(()=>gate);
     await previous.catch(()=>{});
     let released=false;
+    return()=>{
+      if(released)return;
+      released=true;
+      unlock();
+    };
+  }
+
+  async function acquireBrowserWide(){
+    if(navigator?.locks?.request){
+      let grantedResolve;
+      let holdResolve;
+      const granted=new Promise(resolve=>{grantedResolve=resolve});
+      const hold=new Promise(resolve=>{holdResolve=resolve});
+      const request=navigator.locks.request(WEB_LOCK_NAME,{mode:'exclusive'},async()=>{
+        grantedResolve();
+        await hold;
+      });
+      await granted;
+      let released=false;
+      return()=>{
+        if(released)return;
+        released=true;
+        holdResolve();
+        request.catch(()=>{});
+      };
+    }
+
+    // Fallback for browsers without Web Locks: a short renewable localStorage lease.
+    let heartbeat=null;
+    const claim=()=>{
+      const now=Date.now();
+      let current=null;
+      try{current=JSON.parse(localStorage.getItem(LEASE_KEY)||'null')}catch{}
+      if(current&&current.owner!==INSTANCE_ID&&Number(current.expires||0)>now)return false;
+      try{
+        localStorage.setItem(LEASE_KEY,JSON.stringify({owner:INSTANCE_ID,expires:now+LEASE_MS}));
+        const verify=JSON.parse(localStorage.getItem(LEASE_KEY)||'null');
+        return verify?.owner===INSTANCE_ID;
+      }catch{return true}
+    };
+    while(!claim())await sleep(120+Math.floor(Math.random()*180));
+    heartbeat=setInterval(()=>{
+      try{
+        const current=JSON.parse(localStorage.getItem(LEASE_KEY)||'null');
+        if(current?.owner===INSTANCE_ID)localStorage.setItem(LEASE_KEY,JSON.stringify({owner:INSTANCE_ID,expires:Date.now()+LEASE_MS}));
+      }catch{}
+    },Math.floor(LEASE_MS/3));
+    let released=false;
+    return()=>{
+      if(released)return;
+      released=true;
+      if(heartbeat)clearInterval(heartbeat);
+      try{
+        const current=JSON.parse(localStorage.getItem(LEASE_KEY)||'null');
+        if(current?.owner===INSTANCE_ID)localStorage.removeItem(LEASE_KEY);
+      }catch{}
+    };
+  }
+
+  async function acquire(label){
+    const releaseLocal=await acquireLocal();
+    let releaseBrowserWide=null;
+    try{
+      releaseBrowserWide=await acquireBrowserWide();
+    }catch(error){
+      releaseLocal();
+      throw error;
+    }
+    let released=false;
     const timer=setTimeout(()=>release(),TX_TIMEOUT_MS);
     function release(){
       if(released)return;
       released=true;
       clearTimeout(timer);
-      unlock();
-      window.dispatchEvent(new CustomEvent('riftqueuewriteunlock',{detail:{label}}));
+      try{releaseBrowserWide?.()}finally{releaseLocal()}
+      window.dispatchEvent(new CustomEvent('riftqueuewriteunlock',{detail:{label,instance:INSTANCE_ID}}));
     }
-    window.dispatchEvent(new CustomEvent('riftqueuewritelock',{detail:{label}}));
+    window.dispatchEvent(new CustomEvent('riftqueuewritelock',{detail:{label,instance:INSTANCE_ID}}));
     return release;
   }
 
@@ -59,6 +134,17 @@
     }catch{return false}
   }
 
+  // Expose an explicit lock for modules that want to guard a larger transaction.
+  window.__riftQueueWriteCoordinator={
+    acquire,
+    async runExclusive(label,fn){
+      const release=await acquire(label||'explicit-transaction');
+      try{return await fn()}finally{release()}
+    },
+    instanceId:INSTANCE_ID,
+    browserWide:Boolean(navigator?.locks?.request)
+  };
+
   window.fetch=async function riftSerializedFetch(input,init={}){
     const url=requestUrl(input);
     const method=requestMethod(input,init);
@@ -68,8 +154,8 @@
 
     const path=url.pathname;
 
-    // A Git-data commit transaction always starts by reading the queue head.
-    // Hold the mutex until that transaction attempts to advance the queue ref.
+    // A Git-data commit transaction starts by reading the queue head. Hold both
+    // the local mutex and a browser-wide lock until the ref PATCH finishes.
     if(method==='GET'&&HEAD_PATHS.has(path)){
       const release=await acquire('git-data-transaction');
       transactionRelease=release;
@@ -83,23 +169,18 @@
       }
     }
 
-    // Contents API writes are already atomic, but must not overlap a Git-data
-    // transaction on the same branch.
+    // Contents API writes must also wait behind a Git-data transaction in any tab.
     if(queueContentsWrite(url,method,init)){
       const release=await acquire('contents-write');
       try{return await originalFetch(input,init)}finally{release()}
     }
 
-    // Only the transaction that acquired the queue head can reach this PATCH;
-    // release after GitHub accepts or rejects it so a retry can rebase cleanly.
     if(method==='PATCH'&&path===UPDATE_REF_PATH){
       try{return await originalFetch(input,init)}finally{releaseTransaction()}
     }
 
     try{
       const response=await originalFetch(input,init);
-      // If the current Git-data transaction dies before its final ref PATCH,
-      // don't leave every other writer waiting for the timeout.
       if(transactionRelease&&!response.ok&&method==='POST'&&(
         path===`${REPO_PREFIX}/git/trees`||path===`${REPO_PREFIX}/git/commits`
       ))releaseTransaction();

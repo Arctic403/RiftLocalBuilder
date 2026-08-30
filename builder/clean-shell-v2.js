@@ -17,6 +17,7 @@ function moveInto(node,slot){if(!node||!slot||node.parentElement===slot)return;s
 function placeDynamicModules(){
   moveInto(document.querySelector('.inspect-card'),$('#visual-gate-slot'));
   moveInto($('#autonomous-visual-card'),$('#autonomous-slot'));
+  moveInto($('#design-quality-card'),$('#design-quality-slot'));
   moveInto($('#handoff-card'),$('#handoff-slot'));
 }
 placeDynamicModules();
@@ -34,9 +35,10 @@ function syncWorkflowState(){
   setDot('inspect',text==='PASS'?'ready':text==='FAIL'?'fail':null);
   const visual=$('#inspect-status')?.textContent||'';
   const auto=$('#autonomous-visual-status')?.textContent||'';
+  const design=$('#design-quality-status')?.textContent||'';
   const handoff=$('#handoff-status')?.textContent||'';
-  if(/fail/i.test(visual)||/fail|incomplete/i.test(auto))setDot('handoff','fail');
-  else if(/pass|saved|ready/i.test(visual)||/pass/i.test(auto))setDot('handoff','ready');
+  if(/fail/i.test(visual)||/fail|incomplete/i.test(auto)||/failed/i.test(design))setDot('handoff','fail');
+  else if(/pass|saved|ready/i.test(visual)||/pass/i.test(auto)||/quality/i.test(design))setDot('handoff','ready');
   else setDot('handoff',null);
   if(/fail/i.test(handoff))setDot('handoff','fail');
 }

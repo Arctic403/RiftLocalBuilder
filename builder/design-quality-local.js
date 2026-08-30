@@ -7,19 +7,31 @@ function injectUi(){
   const main=$('main');if(!main||$('#design-quality-card'))return;
   const card=document.createElement('section');
   card.id='design-quality-card';card.className='card';
-  card.innerHTML=`<div class="section-title"><div><div class="eyebrow">DESIGN QUALITY</div><h2>Architectural quality telemetry</h2></div><span id="design-quality-status" class="status neutral">Ready</span></div><p class="hint">Runs local geometry + semantic heuristics after visual coverage. It does not pretend to judge aesthetics; it flags likely blocky massing, repetitive facade/room patterns, thin site treatment and missing finish/detail layers so the AI handoff knows what to inspect next.</p><div class="actions"><button id="design-quality-run">Run design review</button></div><div id="design-quality-score" class="hint">No design-quality report yet.</div><div id="design-quality-signals" class="diagnostics"></div>`;
+  card.innerHTML=`<div class="section-title"><div><div class="eyebrow">DESIGN QUALITY</div><h2>Architectural quality telemetry</h2></div><span id="design-quality-status" class="status neutral">Ready</span></div><p class="hint">Runs local geometry + semantic heuristics after visual coverage. Cosmetic shells are judged on exterior structure only; enterable buildings keep the full interior/detail review.</p><div class="actions"><button id="design-quality-run">Run design review</button></div><div id="design-quality-score" class="hint">No design-quality report yet.</div><div id="design-quality-signals" class="diagnostics"></div>`;
   const device=[...main.children].find(el=>el.querySelector?.('#history'));main.insertBefore(card,device||null);
   $('#design-quality-run').onclick=()=>runLatest(true).catch(showError);
 }
 function status(text,kind='neutral'){const el=$('#design-quality-status');if(el){el.textContent=text;el.className=`status ${kind}`}}
 function summary(text){const el=$('#design-quality-score');if(el)el.textContent=text}
 function showError(error){console.error('[Rift Design Quality]',error);status('Review failed','fail');summary(error?.message||String(error))}
+function cosmetic(row){
+  const b=row?.program?.building||{};const tags=Array.isArray(b.tags)?b.tags.map(x=>String(x).toLowerCase()):[];
+  return String(b.mode||'').toLowerCase()==='cosmetic-shell'||tags.includes('cosmetic-shell')||tags.includes('exterior-only');
+}
+function shellReport(base,row){
+  if(!cosmetic(row))return base;
+  const c=base.categories||{},m=Number(c.massing||0),f=Number(c.facade||0),r=Number(c.roof||0),s=Number(c.site||0);
+  const score=Math.max(0,Math.min(100,Math.round((m*.39+f*.39+r*.17+s*.05)*10)/10));
+  const blocked=new Set(['no-asset-instances','repetitive-room-footprints','extreme-room-aspect-ratios']);
+  const signals=(base.signals||[]).filter(x=>!blocked.has(x.code));
+  return {...base,mode:'cosmetic-shell',score,label:score>=85?'shell-strong':score>=70?'shell-developed':score>=55?'shell-basic':'shell-review',status:score>=82&&signals.every(x=>x.severity!=='high')?'design-strong':score>=62?'review-recommended':'detail-pass-needed',categories:{massing:m,facade:f,roof:r,site:s,interior:null,detail:null},signals,priorities:signals.slice(0,5).map(x=>x.code),note:'Cosmetic shell mode: score weights exterior massing, facade, roof and a small site component only. Interior rooms, assets and dressing are intentionally excluded.'};
+}
 function render(report){
   if(!report)return;
   const kind=report.status==='design-strong'?'pass':report.status==='detail-pass-needed'?'fail':'busy';
-  status(`QUALITY ${report.score}`,kind);
+  status(`${report.mode==='cosmetic-shell'?'SHELL':'QUALITY'} ${report.score}`,kind);
   const c=report.categories||{};
-  summary(`Overall ${report.score}/100 · massing ${c.massing??'—'} · facade ${c.facade??'—'} · roof ${c.roof??'—'} · interior ${c.interior??'—'} · detail ${c.detail??'—'} · site ${c.site??'—'}`);
+  summary(report.mode==='cosmetic-shell'?`Exterior ${report.score}/100 · massing ${c.massing??'—'} · facade ${c.facade??'—'} · roof ${c.roof??'—'} · site ${c.site??'—'} · interior/detail intentionally ignored`:`Overall ${report.score}/100 · massing ${c.massing??'—'} · facade ${c.facade??'—'} · roof ${c.roof??'—'} · interior ${c.interior??'—'} · detail ${c.detail??'—'} · site ${c.site??'—'}`);
   const box=$('#design-quality-signals');if(!box)return;
   const rows=report.signals||[];
   box.innerHTML=rows.length?rows.slice(0,8).map(s=>`<div class="diag ${s.severity==='high'?'error':s.severity==='medium'?'warning':'notice'}"><b>${String(s.severity||'notice').toUpperCase()} · ${s.code}</b><br>${s.message}</div>`).join(''):'<div class="diag notice">No heuristic design warnings.</div>';
@@ -34,12 +46,12 @@ async function runLatest(manual=false){
   if(!row){if(manual)throw new Error('No local PASS candidate with compiled geometry is available.');return null}
   running=true;status('Analyzing…','busy');
   try{
-    const report=analyzeDesignQuality(row);
+    const report=shellReport(analyzeDesignQuality(row),row);
     row.publicResult={...row.publicResult,design_quality_report:report};
     await putLocal('candidates',{...row,savedAt:Date.now()});
     await putLocal('results',{id:row.id,publicResult:row.publicResult,savedAt:Date.now()});
     render(report);
-    window.dispatchEvent(new CustomEvent('rift-local-design-quality-ready',{detail:{jobId:row.id,score:report.score,status:report.status}}));
+    window.dispatchEvent(new CustomEvent('rift-local-design-quality-ready',{detail:{jobId:row.id,score:report.score,status:report.status,mode:report.mode||'full'}}));
     return report;
   }finally{running=false}
 }
